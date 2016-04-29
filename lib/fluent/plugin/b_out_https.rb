@@ -1,7 +1,7 @@
 class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     # First, register the plugin. NAME is the name of this plugin
     # and identifies the plugin in the configuration file.
-    Fluent::Plugin.register_output('bhttp', self)
+    Fluent::Plugin.register_output('bhttps', self)
 
     def initialize
       super
@@ -9,14 +9,12 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
       require 'net/https'
       require 'openssl'
       require 'uri'
+      require 'objspace'
     end
 
     # config_param defines a parameter. You can refer a parameter via @path instance variable
     # https or http
     config_param :use_ssl, :bool, :default => false
-
-    # include tag
-    config_param :include_tag, :bool, :default => false
 
     # include timestamp
     config_param :include_timestamp, :bool, :default => false
@@ -49,7 +47,6 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
       super
 
       @use_ssl = conf['use_ssl']
-      @include_tag = conf['include_tag']
       @include_timestamp = conf['include_timestamp']
 
       serializers = [:json, :form]
@@ -119,11 +116,17 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     # This method is called when an event reaches to Fluentd.
     # Convert the event to a raw string.
     def format(tag, time, record)
-      record['timestamp'] = Time.now.to_i
-      cpu_data = cpu_stats(record)
-      #we append \n to the json string to use it as a separator to split the
-      #string and reconstruct a list of metrics to POST at once.
-      cpu_data.to_json + "\n"
+      if @include_timestamp
+        record['timestamp'] = Time.now.to_i
+      end
+      if @serializer == :json
+        cpu_data = cpu_stats(record)
+        #we append \n to the json string to use it as a separator to split the
+        #string and reconstruct a list of metrics to POST at once.
+        return cpu_data.to_json + "\n"
+      else
+        raise "Only json serializer is supported"
+      end
     end
 
     #opentsdb recomments a maximum of 50 metrics in one request.  keepalive not
@@ -134,7 +137,9 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
       uri = URI.parse(@endpoint_url)
       req = Net::HTTP.const_get(@http_method.to_s.capitalize).new(uri.path)
       req.body = record
-      req['Content-Type'] = 'application/json'
+      if @serializer == :json
+        req['Content-Type'] = 'application/json'
+      end
       #$log.info("body #{req.body}")
       return req, uri
     end
@@ -147,16 +152,31 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     #
     # NOTE! This method is called by internal thread, not Fluentd's main thread. So IO wait doesn't affect other plugins.
     def write(chunk)
+      $log.info("buffer chunk size: #{chunk.size}")
       begin
         data = chunk.read
         data_array = data.split("\n")
         fin_data = []
+        size = 0
         data_array.each { |d|
+          size += ObjectSpace.memsize_of(d)
           rd = JSON.parse(d)
+          if size >= 4096
+            $log.warn("content size exceeded 4096. Flushing metrics.")
+            send_metrics(fin_data.to_json)
+            fin_data = []
+            size = ObjectSpace.memsize_of(d)
+          end
           fin_data += rd
         }
         fin_data = fin_data.to_json
-        #$log.info("data #{fin_data}")
+        send_metrics(fin_data)
+        $log.info("metrics sent. size = #{size}")
+      end
+    end
+
+    def send_metrics(fin_data)
+      begin
         req, uri = create_request(fin_data)
         https = Net::HTTP.new(uri.host, uri.port)
         https.use_ssl = @use_ssl

@@ -6,7 +6,9 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     def initialize
       super
       require 'yajl'
-      #require 'json'
+      require 'net/https'
+      require 'openssl'
+      require 'uri'
     end
 
     # config_param defines a parameter. You can refer a parameter via @path instance variable
@@ -117,15 +119,11 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     # This method is called when an event reaches to Fluentd.
     # Convert the event to a raw string.
     def format(tag, time, record)
-      #$log.info("record to format #{record}")
       record['timestamp'] = Time.now.to_i
       cpu_data = cpu_stats(record)
-      #$log.info("cpu data #{cpu_data}")
-      #return Yajl.dump(cpu_data)
+      #we append \n to the json string to use it as a separator to split the
+      #string and reconstruct a list of metrics to POST at once.
       cpu_data.to_json + "\n"
-      #[tag, time, record].to_json + "\n"
-      ## Alternatively, use msgpack to serialize the object.
-      # [tag, time, record].to_msgpack
     end
 
     #opentsdb recomments a maximum of 50 metrics in one request.  keepalive not
@@ -135,10 +133,9 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     def create_request(record)
       uri = URI.parse(@endpoint_url)
       req = Net::HTTP.const_get(@http_method.to_s.capitalize).new(uri.path)
-      #req.body = Yajl.dump(record)
       req.body = record
       req['Content-Type'] = 'application/json'
-      $log.info("body #{req.body}")
+      #$log.info("body #{req.body}")
       return req, uri
     end
 
@@ -159,7 +156,7 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
           fin_data += rd
         }
         fin_data = fin_data.to_json
-        $log.info("data #{fin_data}")
+        #$log.info("data #{fin_data}")
         req, uri = create_request(fin_data)
         https = Net::HTTP.new(uri.host, uri.port)
         https.use_ssl = @use_ssl

@@ -28,11 +28,18 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     # form | json
     config_param :serializer, :string, :default => :form
 
+    # gzip
+    config_param :compression, :string, :default => nil
+
     # Simple rate limiting: ignore any records within `rate_limit_msec`
     # since the last one.
     config_param :rate_limit_msec, :integer, :default => 0
 
+    # maximum payload size.
+    config_param :max_payload, :integer, :default => 4096
+
     # nil | 'none' | 'basic'
+    #not implemented atm.
     config_param :authentication, :string, :default => nil
     config_param :username, :string, :default => ''
     config_param :password, :string, :default => ''
@@ -133,15 +140,24 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     #necessary because this plugin will be called once every 30 seconds or more.
     #we might want to enable chunk support in opentsdb?
     #http://opentsdb.net/docs/build/html/api_http/put.html
-    def create_request(record)
+    def create_request
       uri = URI.parse(@endpoint_url)
       req = Net::HTTP.const_get(@http_method.to_s.capitalize).new(uri.path)
-      req.body = record
+      #req.body = record
       if @serializer == :json
         req['Content-Type'] = 'application/json'
       end
+      https = Net::HTTP.new(uri.host, uri.port)
+      if @use_ssl
+        https.use_ssl = @use_ssl
+        https.ca_file = @ca
+        https.key = OpenSSL::PKey::RSA.new File.read @key
+        https.cert = OpenSSL::X509::Certificate.new File.read @cert
+        # this is insecure. try verify_peer?
+        https.verify_mode = OpenSSL::SSL::VERIFY_NONE
+      end
       #$log.info("body #{req.body}")
-      return req, uri
+      return https, req
     end
 
     # This method is called every flush interval. Write the buffer chunk
@@ -154,6 +170,7 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     def write(chunk)
       $log.info("buffer chunk size: #{chunk.size}")
       begin
+        https, req = create_request()
         data = chunk.read
         data_array = data.split("\n")
         fin_data = []
@@ -161,30 +178,23 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
         data_array.each { |d|
           size += ObjectSpace.memsize_of(d)
           rd = JSON.parse(d)
-          if size >= 4096
-            $log.warn("content size exceeded 4096. Flushing metrics.")
-            send_metrics(fin_data.to_json)
+          if size >= @max_payload
+            $log.warn("content size exceeded #{@max_payload}. Flushing metrics.")
+            send_metrics(https, req, fin_data.to_json)
             fin_data = []
             size = ObjectSpace.memsize_of(d)
           end
           fin_data += rd
         }
-        fin_data = fin_data.to_json
-        send_metrics(fin_data)
+        send_metrics(https, req, fin_data.to_json)
         $log.info("metrics sent. size = #{size}")
       end
     end
 
-    def send_metrics(fin_data)
+    def send_metrics(https, request, data)
       begin
-        req, uri = create_request(fin_data)
-        https = Net::HTTP.new(uri.host, uri.port)
-        https.use_ssl = @use_ssl
-        https.ca_file = @ca
-        https.key = OpenSSL::PKey::RSA.new File.read @key
-        https.cert = OpenSSL::X509::Certificate.new File.read @cert
-        https.verify_mode = OpenSSL::SSL::VERIFY_NONE
-        res = https.start {|http| http.request(req) }
+        request.body = data
+        res = https.start {|http| http.request(request) }
       rescue IOError, EOFError, SystemCallError
         $log.error "Net::HTTP.#{req.method.capitalize} raises exception: #{$!.class}, '#{$!.message}'"
         raise

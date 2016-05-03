@@ -10,6 +10,8 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
       require 'openssl'
       require 'uri'
       require 'objspace'
+      require 'zlib'
+      require 'stringio'
     end
 
     # config_param defines a parameter. You can refer a parameter via @path instance variable
@@ -143,7 +145,6 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     def create_request
       uri = URI.parse(@endpoint_url)
       req = Net::HTTP.const_get(@http_method.to_s.capitalize).new(uri.path)
-      #req.body = record
       if @serializer == :json
         req['Content-Type'] = 'application/json'
       end
@@ -193,10 +194,23 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
 
     def send_metrics(https, request, data)
       begin
-        request.body = data
+        if @compression
+          if @compression != 'gzip'
+            emsg = "Unsupported compression method(#{@compression}). Only gzip is supported"
+            raise emsg
+          end
+          request['Content-Encoding'] = @compression
+          sio = StringIO.new("w")
+          sio_compressed = Zlib::GzipWriter.new(sio)
+          sio_compressed.write(data)
+          sio_compressed.close
+          request.body = sio.string
+        else
+          request.body = data
+        end
         res = https.start {|http| http.request(request) }
       rescue IOError, EOFError, SystemCallError
-        $log.error "Net::HTTP.#{req.method.capitalize} raises exception: #{$!.class}, '#{$!.message}'"
+        $log.error "Net::HTTP.#{request.method.capitalize} raises exception: #{$!.class}, '#{$!.message}'"
         raise
       end
       unless res and res.is_a?(Net::HTTPSuccess)
@@ -205,7 +219,7 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
                       else
                         "res=nil"
                       end
-        emsg = "failed to #{req.method} #{uri} (#{res_summary})"
+        emsg = "failed to #{request.method} (#{res_summary})"
         $log.error emsg
         raise emsg
       end

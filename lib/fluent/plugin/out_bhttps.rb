@@ -93,7 +93,7 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
 
     #return a multimetric input structure.
     #[
-    #    "metric": "totoal-cpu-usr",
+    #    "metric": "total-cpu-usr",
     #    "timestamp": data["timestamp"],
     #    "value": cpu_data["usr"],
     #    "tags": {

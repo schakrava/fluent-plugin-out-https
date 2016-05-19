@@ -120,10 +120,9 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     # }
     #@todo: for now gohan tenant id is hard coded to "admin". But as we resolve
     #ESI-8188, we'll update this boilerplate code.
-    def cpu_stats(data)
+    def cpu_metrics(data)
       for i in 0..@num_cpu_cores-1
         cpu_data = data["dstat"]["cpu#{i}_usage"]
-        $log.info "core num = #{i}. data = #{cpu_data}"
         ret = []
         cpu_data.each { |k, v|
           cur_metric = {
@@ -149,7 +148,7 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
         record['timestamp'] = Time.now.to_i
       end
       if @serializer == :json
-        cpu_data = cpu_stats(record)
+        cpu_data = cpu_metrics(record)
         #we append \n to the json string to use it as a separator to split the
         #string and reconstruct a list of metrics to POST at once.
         return cpu_data.to_json + "\n"

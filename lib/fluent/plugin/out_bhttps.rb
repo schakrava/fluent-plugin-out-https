@@ -49,6 +49,11 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     config_param :ca, :string
     config_param :key, :string
     config_param :cert, :string
+
+    #devconfig is read from the ese to get device id and name for tagging
+    #metrics with.
+    config_param :devconfig, :string, :default => '/persist/etc/esi/device.json'
+
     # This method is called before starting.
     # 'conf' is a Hash that includes configuration parameters.
     # If the configuration is invalid, raise Fluent::ConfigError.
@@ -77,6 +82,13 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
               else
                 :none
               end
+      #number of cores in the system to appropriately
+      #parse dstat output and tag cpu metrics by core.
+      @num_cpu_cores = Integer(%x["/usr/bin/nproc"].strip)
+
+      #device metadata to add to tags.
+      @device_data = JSON.parse(File.read(@devconfig))
+
     end
 
     # This method is called when starting.
@@ -91,34 +103,41 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
       super
     end
 
-    #return a multimetric input structure.
-    #[
-    #    "metric": "total-cpu-usr",
+    #Convert dstat reported cpu metrics into tsdb friendly format with agreed
+    #upon tags. This method returns an array of metrics, where each metric has
+    #the following structure.
+    # {
+    #    "metric": "cpu.<usr|sys|idl|wai>",
     #    "timestamp": data["timestamp"],
-    #    "value": cpu_data["usr"],
+    #    "value": <metric_value>,
     #    "tags": {
-    #        "hostname" = data["hostname"]
-    #    },
-    #    "metric": "total-cpu-sys",
-    #    "timestamp": data["timestamp"],
-    #    "value": cpu_data["sys"],
-    #    "tags": {
-    #        "hostname" = data["hostname"],
+    #        "hostname": data["hostname"],
+    #        "resource_id": <device_id>,
+    #        "resource_name": <device_name>,
+    #        "core": <cpu_core_number>,
+    #        "tenant_id": <gohan_tenant_id>
     #    }
-    #   and so on...
-    #]
-    def cpu_stats(data)
-      cpu_data = data["dstat"]["total_cpu_usage"]
-      ret = []
-      cpu_data.each { |k, v|
-        cur_metric = {
-          "metric" => "total-cpu-" + k,
-          "value" => v,
-          "timestamp" => data["timestamp"],
-          "tags" => {"hostname" => data["hostname"]}
+    # }
+    #@todo: for now gohan tenant id is hard coded to "admin". But as we resolve
+    #ESI-8188, we'll update this boilerplate code.
+    def cpu_metrics(data)
+      for i in 0..@num_cpu_cores-1
+        cpu_data = data["dstat"]["cpu#{i}_usage"]
+        ret = []
+        cpu_data.each { |k, v|
+          cur_metric = {
+            "metric" => "cpu.#{k}",
+            "value" => v,
+            "timestamp" => data["timestamp"],
+            "tags" => {"resource_id" => @device_data["id"],
+                       "resource_name" => @device_data["name"],
+                       "hostname" => data["hostname"],
+                       "core" => i,
+                       "tenant_id" => "admin"}
+          }
+          ret.push(cur_metric)
         }
-        ret.push(cur_metric)
-      }
+      end
       return ret
     end
 
@@ -129,7 +148,7 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
         record['timestamp'] = Time.now.to_i
       end
       if @serializer == :json
-        cpu_data = cpu_stats(record)
+        cpu_data = cpu_metrics(record)
         #we append \n to the json string to use it as a separator to split the
         #string and reconstruct a list of metrics to POST at once.
         return cpu_data.to_json + "\n"

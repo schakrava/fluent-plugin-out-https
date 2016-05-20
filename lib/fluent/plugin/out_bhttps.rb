@@ -127,13 +127,10 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
         cpu_data.each { |k, v|
           cur_metric = {
             "metric" => "cpu.#{k}",
-            "value" => v,
-            "timestamp" => data["timestamp"],
-            "tags" => {"resource_id" => @device_data["id"],
-                       "resource_name" => @device_data["name"],
-                       "hostname" => data["hostname"],
-                       "core" => i,
-                       "tenant_id" => "admin"}
+            "value" => v.to_f,
+            "tags" => {
+              "core" => i,
+            }
           }
           ret.push(cur_metric)
         }
@@ -141,17 +138,71 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
       return ret
     end
 
+    def mem_metrics(data)
+      mem_data = data["dstat"]["memory_usage"]
+      swap_data = data["dstat"]["swap"]
+      metric_array = []
+      mem_data.each { |k, v|
+        mem_metric = {
+          "metric" => "memory.#{k}",
+          "value" => v.to_f
+        }
+        metric_array.push(mem_metric)
+      }
+      swap_data.each { |k, v|
+        swap_metric = {
+          "metric" => "memory.swap.#{k}",
+          "value" => v.to_f
+        }
+        metric_array.push(swap_metric)
+      }
+      return metric_array
+    end
+
+    #general fields are timestamp, hostname and tenant id which are common to
+    #all metrics.
+    def add_gen_fields(metric_array)
+      return metric_array.map { |i|
+        i["timestamp"] = @cur_ts
+        if !i.key?("tags")
+          i["tags"] = {}
+        end
+        i["tags"]["hostname"] = @hostname
+        #@todo: fix this!
+        i["tags"]["tenant_id"] = "admin"
+        i
+      }
+    end
+
+    #device tags are common to cpu and mem metrics. may be even others.
+    def add_device_tags(metric_array)
+      return metric_array.map { |i|
+        if !i.key?("tags")
+          i["tags"] = {}
+        end
+        i["tags"]["resource_id"] = @device_data["id"]
+        i["tags"]["resource_name"] = @device_data["name"]
+        i
+      }
+    end
+
     # This method is called when an event reaches to Fluentd.
     # Convert the event to a raw string.
     def format(tag, time, record)
       if @include_timestamp
-        record['timestamp'] = Time.now.to_i
+        @cur_ts = Time.now.to_i
       end
+      #hostname must be part of every record.
+      @hostname = record["hostname"]
       if @serializer == :json
+        mem_data = mem_metrics(record)
         cpu_data = cpu_metrics(record)
+        compute_data = mem_data + cpu_data
+        compute_data = add_gen_fields(compute_data)
+        compute_data = add_device_tags(compute_data)
         #we append \n to the json string to use it as a separator to split the
         #string and reconstruct a list of metrics to POST at once.
-        return cpu_data.to_json + "\n"
+        return compute_data.to_json + "\n"
       else
         raise "Only json serializer is supported"
       end
@@ -176,7 +227,6 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
         # this is insecure. try verify_peer?
         https.verify_mode = OpenSSL::SSL::VERIFY_NONE
       end
-      #$log.info("body #{req.body}")
       return https, req
     end
 
@@ -186,7 +236,9 @@ class Fluent::BHTTPSOutput < Fluent::BufferedOutput
     # events. You can use 'data = chunk.read' to get all events and
     # 'chunk.open {|io| ... }' to get IO objects.
     #
-    # NOTE! This method is called by internal thread, not Fluentd's main thread. So IO wait doesn't affect other plugins.
+    # NOTE! This method is called by internal thread, not Fluentd's main
+    # thread. So IO wait doesn't affect other plugins.
+
     def write(chunk)
       $log.info("buffer chunk size: #{chunk.size}")
       begin
